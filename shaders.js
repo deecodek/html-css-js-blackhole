@@ -9,13 +9,15 @@ BHShaders.frame = `
 uniform vec2 resolution;
 uniform vec3 cameraPosition, cameraRight, cameraUp, cameraForward, cameraVelocity;
 uniform float tanHalfFov;
+uniform bool infalling;
 // Static tetrad is orthonormal. These vectors express its spatial axes in the
 // pseudo-Cartesian orientation of the orbital plane, not coordinate velocities.
-vec3 launchRay(out float observerFrequency) {
-  vec2 uv=(2.0*gl_FragCoord.xy-resolution)/resolution.y;
+vec3 skyRay(vec2 screenUV,out float observerFrequency) {
+  vec2 uv=(2.0*screenUV-1.0)*vec2(resolution.x/resolution.y,1.0);
   vec3 q=normalize(cameraForward+tanHalfFov*(uv.x*cameraRight+uv.y*cameraUp));
   float b2=dot(cameraVelocity,cameraVelocity);
   observerFrequency=1.0;
+  if(infalling)return q; // The regular EF tetrad is applied in the spatial launch below.
   if(b2<1e-12)return q;
   // Lorentz-transform past-directed k=(-1,q) into the static tetrad.
   // q_s=[q+((gamma-1)(v.q)/b²-gamma)v]/[gamma(1-v.q)].
@@ -24,6 +26,7 @@ vec3 launchRay(out float observerFrequency) {
   observerFrequency=1.0/denominator;
   return normalize((q+((gamma-1.0)*vq/b2-gamma)*cameraVelocity)/denominator);
 }
+vec3 launchRay(out float observerFrequency){return skyRay(gl_FragCoord.xy/resolution,observerFrequency);}
 `;
 
 BHShaders.geometry = `precision highp float;
@@ -34,8 +37,11 @@ uniform sampler2D weakLookup;
 uniform vec3 lookupRange;
 uniform int maxSteps;
 uniform float tolerance, peakTemperature;
+uniform int diskModel;
+uniform float ntPeakFlux;
 layout(location=0) out vec4 physical;
 layout(location=1) out vec4 intersection;
+layout(location=2) out vec4 rayMetadata;
 const float PI=3.141592653589793, ISCO=3.0;
 const float OUTER_DISK=12.0; // Scene boundary of our finite thin disk; not a GR radius.
 const float MIN_STEP=0.0008, MAX_STEP=0.08; // Numerical angular bounds: 100x range.
@@ -57,19 +63,31 @@ void main(){
   float nt=length(tangent);
   physical=vec4(r0,0.0,1.0,obs);
   intersection=vec4(direction,-2.0); // -2 unresolved; never invent a luminous ring.
-  if(nt<1e-7){intersection.w=nr<0.0?-1.0:0.0;return;}
+  rayMetadata=vec4(0.0);
+  float efEnergy=1.0+nr/sqrt(r0);
+  if(infalling){
+    // EF past-directed ray from the radial infaller: E=1+nr/sqrt(r), kr=nr+1/sqrt(r).
+    // E<=0 has no external stationary disk/sky source in this one-exterior scene.
+    if(efEnergy<=0.0){intersection=vec4(0.0,0.0,0.0,-1.0);return;}
+    obs=1.0/efEnergy;physical.w=obs;
+  }
+  if(nt<1e-7){intersection.w=(infalling?nr+inversesqrt(r0):nr)<0.0?-1.0:0.0;return;}
   vec3 e2=tangent/nt;
   // Conserved b=L/E from a local static observer: b=r sin(alpha)/sqrt(f).
-  float b=r0*nt/sqrt(f0);
-  vec2 y=vec2(1.0/r0,-nr*sqrt(f0)/(r0*nt));
+  float b=infalling?r0*nt/efEnergy:r0*nt/sqrt(f0);
+  vec2 y=vec2(1.0/r0,infalling?-(nr+inversesqrt(r0))/(r0*nt):-nr*sqrt(f0)/(r0*nt));
+  float initialInvariant=1.0/(b*b);
+  rayMetadata.x=b;
   // Numerical weak-field table is valid only at its exact observer radius.
   // r>60, b>32 implies periapsis>31rs, beyond the finite disk at 12rs.
-  if(useLookup && abs(r0-lookupRange.z)<1e-4 && b>lookupRange.x && b<0.97*lookupRange.y){
+  if(!infalling && useLookup && abs(r0-lookupRange.z)<1e-4 && b>lookupRange.x && b<0.97*lookupRange.y){
     float x=(b-lookupRange.x)/(lookupRange.y-lookupRange.x);
     float width=float(textureSize(weakLookup,0).x);
     vec4 deflection=texture(weakLookup,vec2((x*(width-1.0)+0.5)/width,nr<0.0?0.25:0.75));
     physical.x=deflection.z;
     intersection=vec4(normalize(e1*deflection.x+e2*deflection.y),0.0);
+    rayMetadata.y=mod(atan(deflection.y,deflection.x)+2.0*PI,2.0*PI);
+    rayMetadata.z=-1.0; // LUT diagnostic unavailable per pixel; inspector uses CPU reference.
     return;
   }
   // p_y(phi)=[e1_y cos(phi)+e2_y sin(phi)]/u.
@@ -103,13 +121,16 @@ void main(){
       float lo=0.0,hi=h;
       for(int j=0;j<12;j++){float mid=(lo+hi)*0.5;if(rk4(y,mid).x>0.0)lo=mid;else hi=mid;}
       float escapedPhi=phi+0.5*(lo+hi);
+      rayMetadata.y=escapedPhi;
       physical.x=minR;
       intersection=vec4(e1*cos(escapedPhi)+e2*sin(escapedPhi),escapedPhi>2.0*PI?1.0:0.0);
       return;
     }
     y=next;phi=nextPhi;minR=min(minR,1.0/y.x);
+    rayMetadata.y=phi;rayMetadata.w=float(i+1);
+    rayMetadata.z=max(rayMetadata.z,abs(y.y*y.y+y.x*y.x*(1.0-y.x)-initialInvariant)/initialInvariant);
     // u=1 is the horizon. Spatial u(phi) is regular; no coordinate t is evolved.
-    if(y.x>=1.0){physical.x=1.0;intersection=vec4(0.0,0.0,0.0,-1.0);return;}
+    if(y.x>=1.0&&(!infalling||r0>1.0||y.y>0.0)){physical.x=1.0;intersection=vec4(0.0,0.0,0.0,-1.0);return;}
     bool onDisk=diskEnabled&&(!coplanar&&abs(phi-crossing)<2e-5);
     if(onDisk){
       float r=1.0/y.x;
@@ -127,6 +148,13 @@ void main(){
         float rPeak=49.0/12.0;
         float peakProfile=(1.0-sqrt(ISCO/rPeak))/(rPeak*rPeak*rPeak);
         float temperature=peakTemperature*pow(max(0.0,(1.0-sqrt(ISCO/r))/(r*r*r))/peakProfile,0.25);
+        if(diskModel==1){
+          // Exact Schwarzschild Page-Thorne flux shape; same normalization as physics.js.
+          float x=sqrt(2.0*r),a=sqrt(3.0),x0=sqrt(6.0);
+          float integral=0.5*(x-x0-a*0.5*log((x-a)/(x+a)*(x0+a)/(x0-a)));
+          float flux=max(0.0,3.0*sqrt(0.5)/(8.0*PI)*integral/(pow(r,3.5)*(1.0-1.5/r)));
+          temperature=peakTemperature*pow(flux/ntPeakFlux,0.25);
+        }
         physical=vec4(r,temperature,doppler,obs);
         // 2 = direct disk, 3+ = progressively wound disk images.
         intersection=vec4(p,2.0+floor(phi/PI));
@@ -151,6 +179,9 @@ uniform int colorMode, thermalConvention, gravityDriver;
 uniform bool dopplerEnabled, redshiftEnabled, skyLensing, higherImages, gravityOverlay, diagnostics;
 uniform float exposure, gravityOpacity, dopplerExaggeration, peakTemperature;
 uniform vec3 paletteA,paletteB,paletteC;
+uniform bool comparisonEnabled;
+uniform int comparisonMode, samplesPerPixel;
+uniform float comparisonSplit;
 out vec4 fragColor;
 const float PI=3.141592653589793;
 vec3 thermal(float t){
@@ -173,37 +204,43 @@ vec3 filmic(vec3 x){
   return clamp((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14),0.0,1.0);
 }
 vec3 srgb(vec3 x){return mix(12.92*x,1.055*pow(x,vec3(1.0/2.4))-.055,step(vec3(.0031308),x));}
-void main(){
-  vec2 uv=gl_FragCoord.xy/resolution;
+vec3 shade(vec2 uv){
   vec4 p=texture(physicalBuffer,uv),hit=texture(intersectionBuffer,uv);
   float tag=hit.w;
-  if(tag<-.5){fragColor=vec4(diagnostics&&tag< -1.5?vec3(1.0,0.0,.7):vec3(0.0),1.0);return;}
-  if(!higherImages&&(tag>=3.0||(tag>.5&&tag<1.5))){fragColor=vec4(0.0,0.0,0.0,1.0);return;}
+  int mode=comparisonEnabled&&uv.x>comparisonSplit?comparisonMode:colorMode;
+  float observerFactor;vec3 initial=skyRay(uv,observerFactor);
+  vec3 skyDirection=tag<1.5&&tag>=0.0&&skyLensing?normalize(hit.xyz):initial;
+  vec2 skyUV=vec2(atan(skyDirection.z,skyDirection.x)/(2.0*PI)+.5,asin(clamp(skyDirection.y,-1.0,1.0))/PI+.5);
+  // Explicit derivatives outside the divergent hit branches. Wrap longitude
+  // derivatives at the map seam; mip filtering integrates finite source footprints.
+  vec2 dx=dFdx(skyUV),dy=dFdy(skyUV);
+  dx.x-=round(dx.x);dy.x-=round(dy.x);
+  if(tag<-.5)return diagnostics&&tag< -1.5?vec3(1.0,0.0,.7):vec3(0.0);
+  if(!higherImages&&(tag>=3.0||(tag>.5&&tag<1.5)))return vec3(0.0);
   float r0=length(cameraPosition),f0=1.0-1.0/r0;
   vec3 color;
   if(tag<1.5){
-    float observerFactor;vec3 initial=launchRay(observerFactor);
-    vec3 d=skyLensing?normalize(hit.xyz):initial;
-    vec2 skyUV=vec2(atan(d.z,d.x)/(2.0*PI)+.5,asin(clamp(d.y,-1.0,1.0))/PI+.5);
     // An extended-source sky: surface brightness is preserved, apparent area changes.
-    color=texture(sky,skyUV).rgb;
+    color=textureGrad(sky,skyUV,dx,dy).rgb;
     // Background radiance uses a reference 6000 K spectrum to approximate its boost.
     // The star map has no measured per-source spectra. This is explicitly a sky model.
-    float shift=(redshiftEnabled?inversesqrt(f0):1.0)*p.w;
+    float shift=(!infalling&&redshiftEnabled?inversesqrt(f0):1.0)*p.w;
     color*=blackbody(6000.0*shift)/max(blackbody(6000.0),vec3(1e-5));
   }else{
     float D=dopplerEnabled?p.z:1.0;
     // Exact static-to-static finite-distance gravitational frequency ratio.
-    float grav=redshiftEnabled?sqrt((1.0-1.0/p.x)/f0):1.0;
+    // An EF observer has no static-frame split at/inside the horizon. p.w=1/E
+    // already carries its complete infinity-to-observer shift; only emission lapse is separate.
+    float grav=redshiftEnabled?sqrt((1.0-1.0/p.x)/(infalling?1.0:f0)):1.0;
     float g=D*grav*p.w,Tobs=p.y*g;
     // Bolometric intensity normalized by sigma*T_peak^4/pi; g^4 is already in Tobs.
     float intensity=pow(Tobs/peakTemperature,4.0);
     float t=clamp(Tobs/peakTemperature,0.0,1.0);
-    if(colorMode==0||colorMode==2){
+    if(mode==0||mode==2){
       // B_nu(nu,gT) = g^3 B_nu(nu/g,T): do NOT multiply by g^4 a second time.
       color=blackbody(Tobs)*.08; // Declared exposure calibration: 10000 K reference.
-    }else if(colorMode==1){color=thermal(t)*intensity;}
-    else if(colorMode==3){
+    }else if(mode==1){color=thermal(t)*intensity;}
+    else if(mode==3){
       color=(t<.5?mix(paletteA,paletteB,t*2.0):mix(paletteB,paletteC,(t-.5)*2.0))*intensity;
     }else{
       // Educational D-only display: symmetric around D=1. Exaggeration changes LUT only.
@@ -213,7 +250,7 @@ void main(){
     }
   }
   color=filmic(color*exp2(exposure));
-  if(gravityOverlay||colorMode==2){
+  if((gravityOverlay||mode==2)&&p.x>1.0){
     // On sky pixels r is closest approach; on disk pixels it is emission radius.
     // z is infinity-referenced, potential dimensionless, K normalized by rs^4.
     float r=max(p.x,1.00001),value;
@@ -223,5 +260,16 @@ void main(){
     vec3 wash=mix(vec3(.015,.18,.42),vec3(1.0,.13,.025),clamp(value,0.0,1.0));
     color=mix(color,wash,gravityOpacity);
   }
+  return color;
+}
+void main(){
+  vec2 uv=gl_FragCoord.xy/resolution;
+  vec3 color;
+  if(samplesPerPixel==4){
+    // Four independently traced subpixels; never interpolate physical hit records.
+    // Filter display-linear samples before sRGB encoding. Filmic mapping is per sample.
+    vec2 d=vec2(.25)/resolution;
+    color=(shade(uv+d)+shade(uv-d)+shade(uv+vec2(d.x,-d.y))+shade(uv+vec2(-d.x,d.y)))*.25;
+  }else color=shade(uv);
   fragColor=vec4(srgb(color),1.0);
 }`;

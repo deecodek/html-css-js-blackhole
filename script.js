@@ -9,7 +9,9 @@
     doppler:true,redshift:true,higherImages:true,skyLensing:true,gravityOverlay:false,
     gravityDriver:'Redshift',gravityOpacity:.3,palette:'Solar amber',cold:'#360e06',
     middle:'#fb751a',hot:'#fff2be',dopplerExaggeration:1,annotations:'Auto',
-    photonMarker:false,quality:'Balanced',diagnostics:false,clockRate:100,paused:false};
+    photonMarker:false,quality:'Balanced',diagnostics:false,clockRate:100,paused:false,
+    diskModel:'Shakura–Sunyaev',periapsis:4.5,betaInfinity:.25,look:'Toward hole',
+    comparison:false,comparisonMode:'Natural',comparisonSplit:.5};
   const settings={...defaults};
   const motion={yaw:.25,elevation:.23,distance:defaults.distance};
   const palettes={
@@ -18,13 +20,14 @@
     'Solar amber':['#360e06','#fb751a','#fff2be'],
     'Cyberpunk':['#102660','#ee167c','#81ffed'],
     'Monochrome gold':['#161006','#927c3c','#fff3b0']};
-  let renderer,target,scene,quad,ortho,geometryMaterial,presentationMaterial,probeMaterial,probeTarget;
+  let renderer,target,scene,quad,ortho,geometryMaterial,presentationMaterial,probeMaterial,probeTarget,pickMaterial,pickTarget;
   let uniforms,gui,controllers={},cameraKm,orbit=null,properTime=0,lastTime=0,frames=0,fpsTime=0;
   let lastBand='',lastLookupRadius=0,lookupTimer,weakTexture,tour=null,drag=null,resizeObserver;
   let width=1,height=1,scale=1,qualityScale=1,frameNumber=0,pausedContext=false;
   let lastProbe=0,lastLabels='',lastResize=0,lowFpsCount=0,fps=0,lastGeometryKey='';
   const vector=(x=0,y=0,z=0)=>new THREE.Vector3(x,y,z);
   const cameraVectors={};
+  let flyby=null,plunge=null,traceMilliseconds=0;
   function fail(message){pausedContext=true;$('error').hidden=false;$('error').textContent=message;$('loading').style.display='none';$('render-label').textContent='RENDERER UNAVAILABLE';}
   if(!window.gsap||!window.lil){
     fail('A CDN dependency could not load. Check your internet connection and allow cdn.jsdelivr.net, then reload. This page needs Three.js, GSAP and lil-gui.');return;
@@ -37,7 +40,7 @@
   const P=BHPhysics;
   const tween=(object,values)=>gsap.to(object,{duration:reducedMotion?0:.7,ease:'power2.out',overwrite:'auto',...values});
   const massKm=()=>P.schwarzschildKm(settings.mass*1e6);
-  const minimumRadius=()=>settings.camera==='Orbiting'?3.05:1.51;
+  const minimumRadius=()=>settings.camera==='Orbiting'?3.05:settings.camera==='Plunge'?.2:1.51;
   function floatTexture(data,w,h){
     const t=new THREE.DataTexture(data,w,h,THREE.RGBAFormat,THREE.FloatType);
     t.minFilter=t.magFilter=THREE.LinearFilter;t.needsUpdate=true;return t;
@@ -88,7 +91,7 @@
     $('render-host').appendChild(renderer.domElement);
     const shared={resolution:{value:new THREE.Vector2(1,1)},cameraPosition:{value:vector()},
       cameraRight:{value:vector()},cameraUp:{value:vector()},cameraForward:{value:vector()},
-      cameraVelocity:{value:vector()},tanHalfFov:{value:1}};
+      cameraVelocity:{value:vector()},tanHalfFov:{value:1},infalling:{value:false}};
     uniforms={...shared,diskEnabled:{value:true},useLookup:{value:false},
       weakLookup:{value:floatTexture(new Float32Array(8),1,2)},lookupRange:{value:vector()},
       maxSteps:{value:512},tolerance:{value:1e-6},peakTemperature:{value:settings.peakTemperature},
@@ -97,16 +100,22 @@
       dopplerEnabled:{value:true},redshiftEnabled:{value:true},skyLensing:{value:true},higherImages:{value:true},
       gravityOverlay:{value:false},diagnostics:{value:false},exposure:{value:settings.exposure},
       gravityOpacity:{value:.3},dopplerExaggeration:{value:1},paletteA:{value:new THREE.Color()},
-      paletteB:{value:new THREE.Color()},paletteC:{value:new THREE.Color()}};
-    target=new THREE.WebGLMultipleRenderTargets(1,1,2);
+      paletteB:{value:new THREE.Color()},paletteC:{value:new THREE.Color()},
+      diskModel:{value:0},ntPeakFlux:{value:P.NT_PEAK_FLUX},metadataBuffer:{value:null},
+      comparisonEnabled:{value:false},comparisonMode:{value:0},comparisonSplit:{value:.5},samplesPerPixel:{value:1}};
+    target=new THREE.WebGLMultipleRenderTargets(1,1,3);
     target.depthBuffer=false;target.stencilBuffer=false;
     target.texture.forEach(t=>{t.type=THREE.FloatType;t.minFilter=t.magFilter=THREE.NearestFilter;t.generateMipmaps=false;});
-    geometryMaterial=new THREE.RawShaderMaterial({glslVersion:THREE.GLSL3,vertexShader:BHShaders.vertex,fragmentShader:BHShaders.geometry,uniforms,depthTest:false,depthWrite:false});
+    geometryMaterial=new THREE.RawShaderMaterial({glslVersion:THREE.GLSL3,vertexShader:BHShaders.vertex,fragmentShader:BHShaders.geometry,uniforms:{...uniforms,resolution:{value:new THREE.Vector2(1,1)}},depthTest:false,depthWrite:false});
     presentationMaterial=new THREE.RawShaderMaterial({glslVersion:THREE.GLSL3,vertexShader:BHShaders.vertex,fragmentShader:BHShaders.presentation,uniforms,depthTest:false,depthWrite:false});
     probeTarget=new THREE.WebGLRenderTarget(64,48,{type:THREE.FloatType,format:THREE.RGBAFormat,depthBuffer:false,minFilter:THREE.NearestFilter,magFilter:THREE.NearestFilter});
     probeMaterial=new THREE.RawShaderMaterial({glslVersion:THREE.GLSL3,vertexShader:BHShaders.vertex,
       fragmentShader:`precision highp float;uniform sampler2D physicalBuffer,intersectionBuffer;out vec4 outputData;void main(){vec2 uv=gl_FragCoord.xy/vec2(64.,48.);vec4 p=texture(physicalBuffer,uv),h=texture(intersectionBuffer,uv);outputData=vec4(p.z,p.x,h.w,1.);}`,
       uniforms,depthTest:false,depthWrite:false});
+    pickTarget=new THREE.WebGLRenderTarget(1,1,{type:THREE.FloatType,format:THREE.RGBAFormat,depthBuffer:false});
+    pickMaterial=new THREE.RawShaderMaterial({glslVersion:THREE.GLSL3,vertexShader:BHShaders.vertex,
+      fragmentShader:`precision highp float;uniform sampler2D source;uniform vec2 point;out vec4 outputData;void main(){outputData=texture(source,point);}`,
+      uniforms:{source:{value:null},point:{value:new THREE.Vector2()}},depthTest:false,depthWrite:false});
     scene=new THREE.Scene();ortho=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
     quad=new THREE.Mesh(new THREE.PlaneGeometry(2,2),geometryMaterial);quad.frustumCulled=false;scene.add(quad);
     cameraKm=massKm()*motion.distance;
@@ -121,7 +130,12 @@
       setMode:mode=>{settings.color=mode;updateMode();gui.controllersRecursive().forEach(c=>c.updateDisplay());},
       setCamera:mode=>{settings.camera=mode;changeCamera();},
       setDistance:r=>{stopTour();setDistance(r,false);},
-      reset,probe:readProbe,physics:P,get fps(){return fps;},get properTime(){return properTime;}};
+      reset,probe:readProbe,physics:P,gui,resize,updateMode,readPixel,
+      get cameraVectors(){return cameraVectors;},get fps(){return fps;},get properTime(){return properTime;},
+      get traceMilliseconds(){return traceMilliseconds;},get flyby(){return flyby;},get plunge(){return plunge;},
+      get frameNumber(){return frameNumber;},get defaults(){return {...defaults};},
+      exportPNG:()=>{quad.material=presentationMaterial;renderer.setRenderTarget(null);renderer.render(scene,ortho);return renderer.domElement.toDataURL('image/png');}};
+    window.dispatchEvent(new Event('blackhole-ready'));
   }
   function buildControls(){
     gui=new lil.GUI({container:$('gui-host'),title:'Simulation'});
@@ -132,15 +146,19 @@
       const next=Math.max(minimumRadius(),Math.min(1000,cameraKm/massKm()));
       motion.distance=settings.distance=next;cameraKm=next*massKm();invalidateLookup();updateReadouts();
     });
-    controllers.camera=space.add(settings,'camera',['Static','Orbiting']).name('Observer').onChange(changeCamera);
+    controllers.camera=space.add(settings,'camera',['Static','Orbiting','Flyby','Plunge']).name('Observer').onChange(changeCamera);
     controllers.distance=space.add(settings,'distance',1.51,1000,.01).name('Distance · rₛ').listen().onChange(value=>{stopTour();setDistance(value);});
-    space.add(settings,'fov',8,110,.1).name('Field of view · °');
+    space.add(settings,'fov',8,150,.1).name('Field of view · °');
     controllers.clock=space.add(settings,'clockRate',1,1000,1).name('Clock rate · ×');
-    controllers.paused=space.add(settings,'paused').name('Pause orbit');
+    controllers.paused=space.add(settings,'paused').name('Pause motion');
+    controllers.look=space.add(settings,'look',['Toward hole','Outward sky']).name('Look direction');
+    controllers.periapsis=space.add(settings,'periapsis',2.05,15,.05).name('Flyby periapsis · rₛ').onFinishChange(()=>changeCamera());
+    controllers.betaInfinity=space.add(settings,'betaInfinity',.05,.8,.01).name('Flyby speed · c').onFinishChange(()=>changeCamera());
     const view=gui.addFolder('Light & color');
     view.add(settings,'color',['Natural','Temperature','Gravity','Artistic','Doppler']).name('Rendering mode').onChange(updateMode);
     view.add(settings,'exposure',-6,6,.05).name('Exposure · EV');
     controllers.temperature=view.add(settings,'peakTemperature',5000,500000,1000).name('Peak temp. · K').onChange(updateMode);
+    view.add(settings,'diskModel',['Shakura–Sunyaev','Novikov–Thorne']).name('Disk model');
     controllers.convention=view.add(settings,'convention',['Public / thermal','Scientific / X-ray']).name('Convention').onChange(updateMode);
     controllers.palette=view.add(settings,'palette',Object.keys(palettes).concat('Custom')).name('Palette').onChange(setPalette);
     ['cold','middle','hot'].forEach((key,i)=>controllers[key]=view.addColor(settings,key).name(['Cool color','Mid color','Hot color'][i]).onChange(()=>{settings.palette='Custom';updateMode();}));
@@ -161,6 +179,11 @@
     guide.add(settings,'quality',['Fast','Balanced','Fine']).name('Render quality').onChange(()=>{qualityScale=1;resize();});
     guide.add(settings,'diagnostics').name('Unresolved rays');
     guide.close();
+    const compare=gui.addFolder('Compare & inspect');
+    compare.add(settings,'comparison').name('Split comparison');
+    compare.add(settings,'comparisonMode',['Natural','Temperature','Gravity','Artistic','Doppler']).name('Right-hand mode');
+    compare.add(settings,'comparisonSplit',.1,.9,.01).name('Split position');
+    compare.close();
     for(const [name,colors] of Object.entries(palettes)){
       const button=document.createElement('button');button.title=name;button.setAttribute('aria-label',name+' palette');
       button.style.background=`linear-gradient(120deg,${colors.join(',')})`;
@@ -198,10 +221,16 @@
     $('legend-high').textContent=mode==='Doppler'?(1+1/settings.dopplerExaggeration).toFixed(2):mode==='Gravity'?'Strong':mode==='Natural'?'30,000 K':peak+' K';
   }
   function updateCameraControls(){
-    const orbiting=settings.camera==='Orbiting';
-    controllers.clock.show(orbiting);controllers.paused.show(orbiting);
-    controllers.distance.min(orbiting?3.05:1.51);
-    $('camera-note').textContent=orbiting?'Circular geodesic · local tetrad + aberration. Navigation resets the orbital plane; radius stays above ISCO.':'Static observer · hovering requires acceleration. Drag changes viewpoint; it does not add observer velocity.';
+    const moving=settings.camera!=='Static';
+    controllers.clock.show(moving);controllers.paused.show(moving);
+    controllers.distance.min(minimumRadius());
+    controllers.periapsis.show(settings.camera==='Flyby');controllers.betaInfinity.show(settings.camera==='Flyby');
+    controllers.look.show(moving);
+    const notes={Static:'Static observer · hovering requires acceleration. Drag changes viewpoint, without adding observer velocity.',
+      Orbiting:'Circular geodesic · local tetrad + aberration. Navigation resets the orbit; stable radius stays above ISCO.',
+      Flyby:'Unbound timelike geodesic · radius and velocity follow the effective potential. Changing periapsis restarts the trajectory.',
+      Plunge:'Radial E = 1 infall · regular Eddington–Finkelstein observer frame. Crosses the horizon; pauses at 0.2 rₛ, before the singularity.'};
+    $('camera-note').textContent=notes[settings.camera];
   }
   function basePosition(){return vector(Math.cos(motion.elevation)*Math.sin(motion.yaw),Math.sin(motion.elevation),Math.cos(motion.elevation)*Math.cos(motion.yaw));}
   function startOrbit(){
@@ -209,13 +238,23 @@
     orbit={a:radial,b:tangent,phase:0};
   }
   function changeCamera(){
-    stopTour();settings.paused=false;
+    stopTour();gsap.killTweensOf(motion);settings.paused=false;properTime=0;flyby=null;plunge=null;
+    motion.distance=Math.max(minimumRadius(),motion.distance);
     if(settings.camera==='Orbiting'){
       if(motion.distance<3.05)setDistance(3.05,false);
       startOrbit();
     }else if(orbit){
       const p=cameraVectors.radial||basePosition();motion.yaw=Math.atan2(p.x,p.z);motion.elevation=Math.asin(p.y);orbit=null;
     }
+    if(settings.camera==='Flyby'){
+      startOrbit();flyby=P.flybyInitial(settings.periapsis,settings.betaInfinity,Math.max(24,motion.distance));motion.distance=flyby.y[0];
+    }
+    if(settings.camera==='Plunge'){
+      // Start near enough that horizon crossing is practical at the explicit clock rate.
+      motion.distance=Math.min(8,Math.max(.2,motion.distance));
+      plunge={start:motion.distance,elapsed:0,v:0};orbit=null;settings.look='Outward sky';settings.fov=110;
+    }
+    invalidateLookup();
     updateCameraControls();
     // GSAP eases a cosmetic panel transition; velocity is always the exact active tetrad.
     gsap.fromTo('.camera-note',{opacity:.3},{opacity:1,duration:reducedMotion?0:.5});
@@ -223,12 +262,16 @@
   function setDistance(value,animate=true){
     const destination=Math.max(minimumRadius(),Math.min(1000,value));
     invalidateLookup();
+    if(settings.camera==='Flyby'||settings.camera==='Plunge'){
+      // Repositioning starts new initial data; never silently splice a geodesic.
+      motion.distance=destination;changeCamera();return;
+    }
     if(animate)tween(motion,{distance:destination,duration:reducedMotion?0:.35,onUpdate:()=>{settings.distance=motion.distance;cameraKm=motion.distance*massKm();}});
     else{gsap.killTweensOf(motion,'distance');motion.distance=settings.distance=destination;cameraKm=destination*massKm();}
   }
   function invalidateLookup(){uniforms.useLookup.value=false;clearTimeout(lookupTimer);lastLookupRadius=0;}
   function scheduleLookup(r){
-    if(r<=60||Math.abs(r-lastLookupRadius)<1e-5)return;
+    if(settings.camera==='Plunge'||r<=60||Math.abs(r-lastLookupRadius)<1e-5)return;
     clearTimeout(lookupTimer);lastLookupRadius=r;
     lookupTimer=setTimeout(()=>{
       if(Math.abs(motion.distance-r)>1e-5)return;
@@ -244,17 +287,21 @@
     const rect=$('viewport').getBoundingClientRect();width=Math.max(1,rect.width);height=Math.max(1,rect.height);
     // Explicit pixel budgets are performance choices. HTML overlays remain native resolution.
     const budgets={Fast:280000,Balanced:620000,Fine:1300000};
-    scale=Math.min(devicePixelRatio,1.5,Math.sqrt(budgets[settings.quality]/(width*height)))*qualityScale;
+    const supersample=settings.quality==='Fine'?2:1;
+    scale=Math.min(devicePixelRatio,1.5,Math.sqrt(budgets[settings.quality]/(width*height))/supersample)*qualityScale;
     scale=Math.max(.3,scale);
     renderer.setPixelRatio(scale);renderer.setSize(width,height);
     const w=Math.max(1,Math.floor(width*scale)),h=Math.max(1,Math.floor(height*scale));
-    target.setSize(w,h);uniforms.resolution.value.set(w,h);
+    target.setSize(w*supersample,h*supersample);uniforms.resolution.value.set(w,h);
+    geometryMaterial.uniforms.resolution.value.set(target.width,target.height);
+    uniforms.samplesPerPixel.value=supersample*supersample;
     uniforms.physicalBuffer.value=target.texture[0];uniforms.intersectionBuffer.value=target.texture[1];
+    uniforms.metadataBuffer.value=target.texture[2];
     $('annotations').setAttribute('viewBox',`0 0 ${width} ${height}`);lastResize=performance.now();lastProbe=0;lastGeometryKey='';
   }
   function updateCamera(dt){
     let radial=basePosition(),velocity=vector();
-    const r=motion.distance;
+    let r=motion.distance;
     if(settings.camera==='Orbiting'){
       if(!orbit)startOrbit();
       // Physical proper seconds per simulated second; explicit user clock acceleration.
@@ -267,7 +314,27 @@
       radial=orbit.a.clone().multiplyScalar(Math.cos(orbit.phase)).addScaledVector(orbit.b,Math.sin(orbit.phase));
       velocity=orbit.a.clone().multiplyScalar(-Math.sin(orbit.phase)).addScaledVector(orbit.b,Math.cos(orbit.phase)).multiplyScalar(P.orbitalBeta(r));
     }
-    const forward=radial.clone().negate();
+    if(settings.camera==='Flyby'&&flyby){
+      const dTau=settings.paused?0:dt*settings.clockRate;properTime+=dTau;
+      let interval=dTau/(massKm()*1000/P.C);
+      while(interval>0){const h=Math.min(.025,interval);flyby.y=P.timelikeStep(flyby.y,flyby.L,h);interval-=h;}
+      r=motion.distance=flyby.y[0];
+      radial=orbit.a.clone().multiplyScalar(Math.cos(flyby.y[2])).addScaledVector(orbit.b,Math.sin(flyby.y[2]));
+      const tangent=orbit.a.clone().multiplyScalar(-Math.sin(flyby.y[2])).addScaledVector(orbit.b,Math.cos(flyby.y[2]));
+      // Local static components: beta_r=(dr/dtau)/E, beta_phi=L sqrt(f)/(rE).
+      velocity=radial.clone().multiplyScalar(flyby.y[1]/flyby.E).addScaledVector(tangent,flyby.L*Math.sqrt(P.lapse(r))/(r*flyby.E));
+      if(r>flyby.startRadius*1.1&&flyby.y[1]>0)settings.paused=true;
+    }
+    if(settings.camera==='Plunge'&&plunge){
+      const remaining=(Math.pow(plunge.start,1.5)-Math.pow(.2,1.5))/1.5-plunge.elapsed;
+      const interval=settings.paused?0:Math.max(0,Math.min(remaining,dt*settings.clockRate/(massKm()*1000/P.C)));
+      const previous=r;plunge.elapsed+=interval;properTime+=interval*(massKm()*1000/P.C);
+      r=motion.distance=Math.max(.2,P.infallRadius(plunge.start,plunge.elapsed));
+      // dv/dtau=1/(1+1/sqrt(r)) is regular through the future horizon.
+      plunge.v+=interval*.5*(1/(1+1/Math.sqrt(previous))+1/(1+1/Math.sqrt(r)));
+      if(r<=.200001)settings.paused=true;
+    }
+    const forward=radial.clone().multiplyScalar(settings.look==='Outward sky'?1:-1);
     // Stable screen roll through the tilted orbit's poles: orbit normal is camera up reference.
     const upReference=orbit?orbit.a.clone().cross(orbit.b).normalize():vector(0,1,0);
     const right=forward.clone().cross(upReference).normalize(),up=right.clone().cross(forward).normalize();
@@ -275,11 +342,15 @@
     uniforms.cameraPosition.value.copy(radial).multiplyScalar(r);
     uniforms.cameraRight.value.copy(right);uniforms.cameraUp.value.copy(up);uniforms.cameraForward.value.copy(forward);
     uniforms.cameraVelocity.value.copy(velocity);uniforms.tanHalfFov.value=Math.tan(settings.fov*Math.PI/360);
+    uniforms.infalling.value=settings.camera==='Plunge';
     settings.distance=r;cameraKm=r*massKm();
     scheduleLookup(r);
   }
   function updateUniforms(){
     uniforms.diskEnabled.value=settings.disk;
+    uniforms.diskModel.value=settings.diskModel==='Novikov–Thorne'?1:0;
+    uniforms.comparisonEnabled.value=settings.comparison;uniforms.comparisonSplit.value=settings.comparisonSplit;
+    uniforms.comparisonMode.value=['Natural','Temperature','Gravity','Artistic','Doppler'].indexOf(settings.comparisonMode);
     uniforms.colorMode.value=['Natural','Temperature','Gravity','Artistic','Doppler'].indexOf(settings.color);
     uniforms.thermalConvention.value=settings.convention==='Public / thermal'?0:1;
     uniforms.gravityDriver.value=['Redshift','Potential','Curvature'].indexOf(settings.gravityDriver);
@@ -295,21 +366,21 @@
     $('mass-value').innerHTML=settings.mass.toFixed(2)+' <small>million M☉</small>';
     for(const [id,factor] of [['horizon-value',1],['photon-value',1.5],['isco-value',3]])$(id).innerHTML=(rs*factor/1e6).toFixed(2)+' <small>million km</small>';
     $('camera-radius').innerHTML=r.toFixed(r>100?1:2)+' <small>rₛ</small>';
-    $('camera-speed').textContent='LOCAL SPEED '+(settings.camera==='Orbiting'?P.orbitalBeta(r).toFixed(3):'0.000')+' c';
+    $('camera-speed').textContent=settings.camera==='Plunge'?(r>1?'STATIC-FRAME SPEED '+(1/Math.sqrt(r)).toFixed(3)+' c':'INSIDE THE EVENT HORIZON'):'LOCAL SPEED '+cameraVectors.velocity.length().toFixed(3)+' c';
     // Log radius minimap: named radii have exactly mapped positions, not equal spacing.
-    const radius=x=>13+42*Math.log(x)/Math.log(1000);
+    const radius=x=>x<1?13*x:13+42*Math.log(x)/Math.log(1000);
     const rings=$('radar').querySelectorAll('circle');rings[1].setAttribute('r',radius(1.5));rings[2].setAttribute('r',radius(3));
     const pos=cameraVectors.radial||basePosition(),angle=Math.atan2(pos.x,pos.z),rr=radius(r);
     const x=65+rr*Math.sin(angle),y=65-rr*Math.cos(angle);
     $('radar-camera').setAttribute('cx',x);$('radar-camera').setAttribute('cy',y);
     $('radar-line').setAttribute('x2',x);$('radar-line').setAttribute('y2',y);
     $('radar').setAttribute('aria-label',`Logarithmic radial map. Observer ${r.toFixed(2)} Schwarzschild radii. Horizon 1, photon sphere 1.5, ISCO 3.`);
-    $('precision-note').textContent=`RK4 ≤ ${uniforms.maxSteps.value} steps · ${target.width} × ${target.height}${uniforms.useLookup.value?' · sky LUT':''}`;
+    $('precision-note').textContent=`RK4 ≤ ${uniforms.maxSteps.value} · ${target.width} × ${target.height}${settings.quality==='Fine'?' · 4 rays/pixel':''}${uniforms.useLookup.value?' · sky LUT':''}`;
   }
   function updateBand(){
-    const r=motion.distance,band=r>100?'Far':r>10?'Medium':r>3?'Close':'Extreme';
+    const r=motion.distance,band=r<=1?'Interior':r>100?'Far':r>10?'Medium':r>3?'Close':'Extreme';
     if(band===lastBand)return;lastBand=band;
-    const text={Far:'The shadow subtends a small angle. A narrow field of view helps resolve background lensing.',Medium:'Light from the far side of the disk bends over and under the shadow.',Close:'Doppler beaming and finite-distance frequency shifts are prominent. Look for higher-order disk images.',Extreme:'Near the unstable photon orbit, rays can wind around the hole. Finite pixel and precision limits matter here.'};
+    const text={Far:'The shadow subtends a small angle. A narrow field of view helps resolve background lensing.',Medium:'Light from the far side of the disk bends over and under the shadow.',Close:'Doppler beaming and finite-distance frequency shifts are prominent. Look for higher-order disk images.',Extreme:'Near the unstable photon orbit, rays can wind around the hole. Finite pixel and precision limits matter here.',Interior:'You are inside the future horizon. External light can still reach you; no future-directed signal can escape back out.'};
     $('band-title').textContent=band.toUpperCase()+' FIELD';$('band-description').textContent=text[band];
     document.querySelectorAll('.band-progress i').forEach((e,i)=>e.classList.toggle('active',i===['Far','Medium','Close','Extreme'].indexOf(band)));
     gsap.fromTo('.regime-card',{opacity:.35},{opacity:1,duration:reducedMotion?0:.7});
@@ -323,7 +394,7 @@
     return [width/2+q.dot(v.right)*unit,height/2-q.dot(v.up)*unit];
   }
   function criticalGuide(){
-    if(!settings.photonMarker){$('critical-marker').innerHTML='';return;}
+    if(!settings.photonMarker||settings.camera==='Plunge'||settings.look==='Outward sky'){$('critical-marker').innerHTML='';return;}
     const r=motion.distance,alpha=Math.asin(Math.min(1,P.BC*Math.sqrt(1-1/r)/r));
     const v=cameraVectors,points=[];
     // Critical cone in the static tetrad, transformed into the moving camera.
@@ -345,6 +416,12 @@
     renderer.readRenderTargetPixels(probeTarget,0,0,64,48,data);
     renderer.setRenderTarget(null);quad.material=presentationMaterial;
     return data;
+  }
+  function readPixel(uv){
+    const point=[(Math.floor(uv[0]*target.width)+.5)/target.width,(Math.floor(uv[1]*target.height)+.5)/target.height];
+    pickMaterial.uniforms.point.value.set(...point);quad.material=pickMaterial;renderer.setRenderTarget(pickTarget);
+    const records=target.texture.map(texture=>{const values=new Float32Array(4);pickMaterial.uniforms.source.value=texture;renderer.render(scene,ortho);renderer.readRenderTargetPixels(pickTarget,0,0,1,1,values);return Array.from(values);});
+    renderer.setRenderTarget(null);quad.material=presentationMaterial;return {physical:records[0],intersection:records[1],metadata:records[2],uv:point};
   }
   function updateAnnotations(time){
     criticalGuide();
@@ -391,7 +468,7 @@
     }
   }
   function reset(){
-    stopTour();gsap.killTweensOf(motion);Object.assign(settings,defaults);orbit=null;properTime=0;qualityScale=1;
+    stopTour();gsap.killTweensOf(motion);Object.assign(settings,defaults);orbit=null;flyby=null;plunge=null;properTime=0;qualityScale=1;
     Object.assign(motion,{yaw:.25,elevation:.23,distance:defaults.distance});cameraKm=massKm()*motion.distance;
     invalidateLookup();lastBand='';updateCameraControls();setPalette(settings.palette);resize();
     gui.controllersRecursive().forEach(c=>c.updateDisplay());
@@ -435,8 +512,8 @@
     // The model is stationary. Reuse exact intersection buffers until a geometric
     // input changes; palette/exposure/toggle edits need only the cheap display pass.
     const geometryKey=[...uniforms.cameraPosition.value.toArray(),...uniforms.cameraRight.value.toArray(),
-      ...uniforms.cameraUp.value.toArray(),...uniforms.cameraVelocity.value.toArray(),settings.fov,
-      settings.disk,settings.peakTemperature,uniforms.maxSteps.value,uniforms.tolerance.value,
+      ...uniforms.cameraUp.value.toArray(),...uniforms.cameraForward.value.toArray(),...uniforms.cameraVelocity.value.toArray(),settings.fov,
+      settings.disk,settings.diskModel,settings.camera,settings.peakTemperature,uniforms.maxSteps.value,uniforms.tolerance.value,
       uniforms.useLookup.value,uniforms.lookupRange.value.z].join(',');
     const traced=geometryKey!==lastGeometryKey;
     try{

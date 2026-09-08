@@ -42,6 +42,64 @@
     const f=x => Math.max(0, (1-Math.sqrt(ISCO/x))/(x*x*x));
     return peak * Math.pow(f(r)/f(49/12), 0.25);
   }
+  function ntFlux(r) {
+    // Page-Thorne (1974): F=-Mdot Omega'/(4*pi*r*(E-Omega L)^2)
+    // * integral_ISCO^r (E-Omega L)L' dr. M=1/2, Mdot=1 here.
+    // Schwarzschild primitive J=M[x-sqrt(6)-sqrt(3)/2*log(...)], x=sqrt(r/M).
+    if(r<=3)return 0;
+    const x=Math.sqrt(2*r),a=Math.sqrt(3),x0=Math.sqrt(6);
+    const integral=.5*(x-x0-a/2*Math.log((x-a)/(x+a)*(x0+a)/(x0-a)));
+    return Math.max(0,3*Math.sqrt(.5)/(8*Math.PI)*integral/(Math.pow(r,3.5)*(1-1.5/r)));
+  }
+  let ntPeakRadius=3;
+  for(let r=3;r<=12;r+=.001)if(ntFlux(r)>ntFlux(ntPeakRadius))ntPeakRadius=r;
+  const NT_PEAK_FLUX=ntFlux(ntPeakRadius);
+  function timelikeStep(y,L,h){
+    // y=(r,dr/dtau,phi). V_eff=(1-1/r)(1+L^2/r^2).
+    // r''=-V_eff'/2=-1/(2r²)+L²/r³-3L²/(2r⁴); phi'=L/r².
+    const f=([r,v])=>[v,-.5/(r*r)+L*L/(r*r*r)-1.5*L*L/(r*r*r*r),L/(r*r)];
+    const a=f(y),b=f(y.map((v,i)=>v+h*a[i]/2)),c=f(y.map((v,i)=>v+h*b[i]/2)),d=f(y.map((v,i)=>v+h*c[i]));
+    return y.map((v,i)=>v+h*(a[i]+2*b[i]+2*c[i]+d[i])/6);
+  }
+  const timelikeEnergySquared=(r,v,L)=>v*v+lapse(r)*(1+L*L/(r*r));
+  function flybyInitial(periapsis=4.5,betaInfinity=.25,startRadius=30){
+    const E=1/Math.sqrt(1-betaInfinity*betaInfinity),rp=Math.max(2.05,periapsis);
+    const L=rp*Math.sqrt(E*E/lapse(rp)-1),r=Math.max(startRadius,rp*3);
+    return {E,L,y:[r,-Math.sqrt(E*E-lapse(r)*(1+L*L/(r*r))),0],startRadius:r};
+  }
+  function infallRadius(initial,properGeometricTime){
+    // Exact radial E=1 infall: dr/dtau=-sqrt(1/r), so r^(3/2)=r0^(3/2)-3tau/2.
+    return Math.pow(Math.max(0,Math.pow(initial,1.5)-1.5*properGeometricTime),2/3);
+  }
+  function efLaunch(r,nr,nt){
+    // Ingoing EF metric ds²=-f dv²+2dvdr+r²dOmega². s=1/sqrt(r).
+    // U=(1/(1+s),-s); outward N=(1/(1+s),1). Past k=-U+nr N+nt e_tan.
+    // p_v=1+s*nr, k^r=s+nr, L=r*nt. No 1/f or static-frame singularity.
+    const s=1/Math.sqrt(r),energy=1+s*nr,L=r*nt;
+    return {energy,radial:s+nr,kv:(nr-1)/(1+s),L,b:L/energy,w:-(s+nr)/L,frequency:1/energy};
+  }
+  function referenceRay({r,w,crossing=Math.PI,disk=true,interior=false,step=.0025}){
+    // Double-precision spatial reference for one selected pixel, independently stepped.
+    let y=[1/r,w],phi=0,nextCrossing=crossing,drift=0,minR=r;
+    const initial=invariant(y),points=[[r,0]],finish=(status)=>({status,r:1/y[0],w:y[1],phi,minR,drift,points});
+    for(let i=0;i<16000;i++){
+      const h=Math.min(step,nextCrossing-phi);
+      const next=rk4(y,h);
+      if(next[0]<=0){
+        let lo=0,hi=h;for(let j=0;j<25;j++){const mid=(lo+hi)/2;if(rk4(y,mid)[0]>0)lo=mid;else hi=mid;}
+        phi+=(lo+hi)/2;points.push([10000*Math.cos(phi),10000*Math.sin(phi)]);return {...finish('sky'),r:Infinity};
+      }
+      y=next;phi+=h;minR=Math.min(minR,1/y[0]);
+      drift=Math.max(drift,Math.abs(invariant(y)-initial)/Math.max(Math.abs(initial),1e-16));
+      if(i%6===0)points.push([Math.cos(phi)/y[0],Math.sin(phi)/y[0]]);
+      if(y[0]>=1&&(!interior||y[1]>0))return finish('captured');
+      if(Math.abs(phi-nextCrossing)<1e-9){
+        if(disk&&1/y[0]>=3&&1/y[0]<=12){points.push([Math.cos(phi)/y[0],Math.sin(phi)/y[0]]);return finish('disk');}
+        nextCrossing+=Math.PI;
+      }
+    }
+    return finish('unresolved');
+  }
   const dot=(a,b)=>a.reduce((s,x,i)=>s+x*b[i],0);
   function boostSky(q,v) {
     // Inverse aberration of a past-directed sky ray from moving to static tetrad.
@@ -90,6 +148,7 @@
     return {data,bMin,bMax,r,size};
   }
   root.BHPhysics={G,C,SOLAR_MASS,BC,ISCO,PHOTON_SPHERE,TEMP_MIN,TEMP_MAX,
-    schwarzschildKm,lapse,orbitalBeta,invariant,derivative,rk4,trace,temperature,boostSky,spectrumXYZ,spectrumTable,weakTable};
+    schwarzschildKm,lapse,orbitalBeta,invariant,derivative,rk4,trace,temperature,boostSky,spectrumXYZ,spectrumTable,weakTable,
+    ntFlux,NT_PEAK_FLUX,ntPeakRadius,timelikeStep,timelikeEnergySquared,flybyInitial,infallRadius,efLaunch,referenceRay};
   if(typeof module!=='undefined')module.exports=root.BHPhysics;
 })(globalThis);

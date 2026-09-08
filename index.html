@@ -12,6 +12,7 @@
   <script defer src="physics.js"></script>
   <script defer src="shaders.js"></script>
   <script defer src="script.js"></script>
+  <script defer src="lab-tools.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -26,6 +27,7 @@
       <div class="viewport-heading"><span class="eyebrow">01 / THE SCHWARZSCHILD SOLUTION</span><h1>Gravity. Made visible.</h1><p>Follow light to the edge of a black hole.</p></div>
       <div class="render-status"><span class="live-dot"></span><span id="render-label">INITIALIZING GEODESICS</span><span id="fps">— FPS</span></div>
       <svg id="annotations" aria-hidden="true"><g id="critical-marker"></g><g id="disk-labels"></g></svg>
+      <div id="comparison-label" hidden></div>
       <div id="loading" role="status"><span class="loading-orbit"></span><span>Tracing the geometry of spacetime…</span></div>
       <div id="error" role="alert" hidden></div>
       <div class="regime-card"><span class="eyebrow" id="band-title">MEDIUM FIELD</span><p id="band-description">Light from the far side of the disk bends over and under the shadow.</p><div class="band-progress"><i></i><i class="active"></i><i></i><i></i></div></div>
@@ -42,6 +44,9 @@
       <div class="radar-card"><div><span class="eyebrow">OBSERVER POSITION</span><strong id="camera-radius">24.00 <small>rₛ</small></strong><span id="camera-speed">LOCAL SPEED 0.000 c</span></div><svg id="radar" viewBox="0 0 130 130" aria-label="Logarithmic observer position diagram"><circle cx="65" cy="65" r="13" class="radar-horizon"/><circle cx="65" cy="65" r="19"/><circle cx="65" cy="65" r="30"/><circle cx="65" cy="65" r="55" class="radar-outer"/><path d="M65 3V127M3 65H127"/><line id="radar-line" x1="65" y1="65" x2="105" y2="35"/><circle id="radar-camera" cx="105" cy="35" r="3"/></svg></div>
       <div class="radar-key"><span>● Horizon</span><span>◌ Photon sphere</span><span>◯ ISCO</span></div>
       <p class="precision-note" id="precision-note">Adaptive RK4 · finite ray budget</p>
+      <div class="lab-actions"><button id="inspect-button" aria-pressed="false">⌖ Inspect a ray</button><button id="export-button">↓ Export PNG</button><button id="save-button">Save scene</button><button id="load-button">Load scene</button><button id="share-button">Copy scene URL</button></div>
+      <p id="tools-message" role="status">Select a photon to reveal its path and frequency shifts.</p>
+      <input id="scene-url" aria-label="Shareable scene URL" readonly hidden>
     </aside>
   </main>
 
@@ -65,6 +70,13 @@
     <details><summary>06 — Gravity maps & switches</summary><code>z = 1/√(1 − rₛ/r) − 1<br>Φ/c² = −rₛ/(2r) · K rₛ⁴ = 12(rₛ/r)⁶</code><p>The overlay samples emission radius on the disk and closest approach on background rays. It is an educational scalar wash. Turning disk Doppler or gravity shift off sets the corresponding frequency factor to one. Higher-order light off discards wound image contributions; sky lensing off uses unbent sky directions. These switches deliberately break parts of the physical image for comparison.</p></details>
     <details><summary>07 — Accuracy & browser limits</summary><p>Geometry follows exact Schwarzschild equations, solved to finite numerical accuracy. Approximations include the Newtonian disk temperature profile, zero disk thickness, a synthetic sky with finite-size stars, CIE fitting, finite pixels, and a bounded RK4 budget. Single-precision GPU arithmetic limits very high-order sub-rings; the diagnostics switch marks unresolved rays magenta. A double-precision numerical lookup accelerates eligible weak-field sky rays.</p><p>No time-coordinate integration is needed for this stationary scene: u(φ) remains regular at the horizon. There is no horizon-crossing plunge, Kerr spin, plasma scattering, GRMHD, or DNGR-style beam tracing. Performance depends on the GPU and selected resolution.</p></details>
     <div class="sources"><a href="PHYSICS.md" target="_blank" rel="noopener">Full equations & implementation notes ↗</a><a href="https://arxiv.org/abs/1502.03808" target="_blank" rel="noopener">James et al. / DNGR ↗</a><a href="https://ebruneton.github.io/black_hole_shader/" target="_blank" rel="noopener">Bruneton / WebGL reference ↗</a><a href="https://www.damtp.cam.ac.uk/user/us248/Lectures/Notes/grII.pdf" target="_blank" rel="noopener">Cambridge / Schwarzschild GR ↗</a></div>
+  </dialog>
+  <dialog id="inspector-dialog" aria-labelledby="inspector-title">
+    <button id="close-inspector" class="dialog-close" aria-label="Close ray inspector">×</button>
+    <span class="eyebrow">ONE PIXEL / ONE NULL GEODESIC</span><h2 id="inspector-title">Follow this photon.</h2>
+    <svg id="ray-diagram" viewBox="0 0 420 220" role="img" aria-label="Selected photon trajectory in its orbital plane"></svg>
+    <dl id="inspector-values"></dl><p id="accuracy-result"></p><p id="ray-note"></p>
+    <button id="export-ray">Download ray data & reference path</button>
   </dialog>
   <noscript><p class="noscript">JavaScript and WebGL2 are required for the numerical ray tracer.</p></noscript>
 </body>
