@@ -95,12 +95,31 @@ is proper time with an explicitly displayed adjustable simulation clock multipli
 5. [Armitage, accretion disk lectures](https://arxiv.org/abs/astro-ph/0701485): zero-torque thin-disk temperature law.
 6. [Wyman, Sloan & Shirley (2013), CIE fits](https://jcgt.org/published/0002/02/01/paper.pdf): analytic color matching coefficients.
 
+## Dynamic objects
+
+Moving objects are tracked as worldtubes in ingoing Kerr–Schild coordinates (`relativity.js`).
+Each object carries a history of position, 4-velocity and shape (axes + temperature) that is
+uploaded to the GPU as float textures. The geometry shader (`dynamic-shader.js`) performs a
+ray–ellipsoid intersection test at each RK4 step: it binary-searches the object history for
+the ray's current KS coordinate time, interpolates center and 4-velocity, transforms the
+ray into the object's local orthonormal tetrad, and evaluates an ellipsoidal distance
+function. A bisection refines the earliest intersection along the finite ray segment.
+The hit emits blackbody radiation modulated by the full four-vector frequency ratio.
+
+Object types: Probe (point beacon), Rock (tidal disruption), Spacecraft, Star (spaghetti
+effect + debris cloud), Cloud (collisionless particle set), Light (null geodesic tracer).
+Material response uses a reduced affine model with spring restoring force and viscous
+damping; disruption occurs when tidal stress exceeds the configured strength threshold.
+
 ## Build checklist
 
-- [ ] CDN harness and responsive page
-- [ ] Static observer, RK4, conserved-quantity and capture validation
-- [ ] Opaque disk, frequency transport, lensed sky
-- [ ] Five presentation modes and legends
-- [ ] Orbiting tetrad, aberration and proper-time clock
-- [ ] Zoom bands, numerical LOD, weak-field lookup, annotations and radar
-- [ ] Browser checks, diagnostics, documentation and handoff
+- [x] CDN harness and responsive page
+- [x] Static observer, RK4, conserved-quantity and capture validation
+- [x] Opaque disk, frequency transport, lensed sky
+- [x] Five presentation modes and legends
+- [x] Orbiting tetrad, aberration and proper-time clock
+- [x] Zoom bands, numerical LOD, weak-field lookup, annotations and radar
+- [x] Browser checks, diagnostics, documentation and handoff
+- [x] Dynamic objects: moving-source worldtube intersections, experiment engine, relativity module
+- [x] Experiment UI: spawn/remove/reset controls, object list panel, GUI folder
+- [x] Tests: relativity module (initial, advance, tidal, electric tidal), experiment engine (spawn, advance, snapshot, material, disruption, 8-object limit)

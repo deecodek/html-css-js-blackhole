@@ -11,7 +11,8 @@
     middle:'#fb751a',hot:'#fff2be',dopplerExaggeration:1,annotations:'Auto',
     photonMarker:false,quality:'Balanced',diagnostics:false,clockRate:100,paused:false,
     diskModel:'Shakura–Sunyaev',periapsis:4.5,betaInfinity:.25,look:'Toward hole',
-    comparison:false,comparisonMode:'Natural',comparisonSplit:.5};
+    comparison:false,comparisonMode:'Natural',comparisonSplit:.5,
+    experimentSpeed:1,experimentAzimuth:0,experimentElevation:.12,experimentRadius:8};
   const settings={...defaults};
   const motion={yaw:.25,elevation:.23,distance:defaults.distance};
   const palettes={
@@ -27,7 +28,7 @@
   let lastProbe=0,lastLabels='',lastResize=0,lowFpsCount=0,fps=0,lastGeometryKey='';
   const vector=(x=0,y=0,z=0)=>new THREE.Vector3(x,y,z);
   const cameraVectors={};
-  let flyby=null,plunge=null,traceMilliseconds=0;
+  let flyby=null,plunge=null,traceMilliseconds=0,experiment=null;
   function fail(message){pausedContext=true;$('error').hidden=false;$('error').textContent=message;$('loading').style.display='none';$('render-label').textContent='RENDERER UNAVAILABLE';}
   if(!window.gsap||!window.lil){
     fail('A CDN dependency could not load. Check your internet connection and allow cdn.jsdelivr.net, then reload. This page needs Three.js, GSAP and lil-gui.');return;
@@ -110,6 +111,7 @@
     target=new THREE.WebGLMultipleRenderTargets(1,1,3);
     target.depthBuffer=false;target.stencilBuffer=false;
     target.texture.forEach(t=>{t.type=THREE.FloatType;t.minFilter=t.magFilter=THREE.NearestFilter;t.generateMipmaps=false;});
+    experiment=new BHExperimentEngine();experiment.reset({mass:settings.mass*1e6});
     geometryMaterial=new THREE.RawShaderMaterial({glslVersion:THREE.GLSL3,vertexShader:BHShaders.vertex,fragmentShader:BHShaders.geometry,uniforms:{...uniforms,resolution:{value:new THREE.Vector2(1,1)}},depthTest:false,depthWrite:false});
     presentationMaterial=new THREE.RawShaderMaterial({glslVersion:THREE.GLSL3,vertexShader:BHShaders.vertex,fragmentShader:BHShaders.presentation,uniforms,depthTest:false,depthWrite:false});
     probeTarget=new THREE.WebGLRenderTarget(64,48,{type:THREE.FloatType,format:THREE.RGBAFormat,depthBuffer:false,minFilter:THREE.NearestFilter,magFilter:THREE.NearestFilter});
@@ -123,7 +125,7 @@
     scene=new THREE.Scene();ortho=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
     quad=new THREE.Mesh(new THREE.PlaneGeometry(2,2),geometryMaterial);quad.frustumCulled=false;scene.add(quad);
     cameraKm=massKm()*motion.distance;
-    buildControls();bindEvents();setPalette(settings.palette);updateMode();resize();
+    buildControls();bindEvents();setPalette(settings.palette);updateMode();resize();updateExperimentList();
     resizeObserver=new ResizeObserver(()=>resize());resizeObserver.observe($('viewport'));
     canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();pausedContext=true;fail('The GPU context was lost. Reload the page to recreate the numerical buffers.');});
     gsap.from('.viewport-heading,.panel-heading,.readouts',{opacity:0,y:reducedMotion?0:8,duration:reducedMotion?0:1,stagger:.1});
@@ -138,7 +140,8 @@
       get cameraVectors(){return cameraVectors;},get fps(){return fps;},get properTime(){return properTime;},
       get traceMilliseconds(){return traceMilliseconds;},get flyby(){return flyby;},get plunge(){return plunge;},
       get frameNumber(){return frameNumber;},get defaults(){return {...defaults};},
-      exportPNG:()=>{quad.material=presentationMaterial;renderer.setRenderTarget(null);renderer.render(scene,ortho);return renderer.domElement.toDataURL('image/png');}};
+      exportPNG:()=>{quad.material=presentationMaterial;renderer.setRenderTarget(null);renderer.render(scene,ortho);return renderer.domElement.toDataURL('image/png');},
+      experiment,spawnObject:(type,config)=>{if(!experiment)return null;const id=experiment.spawn({type,...config});updateExperimentList();return id;},removeObject:(id)=>{if(!experiment)return;const o=experiment.objects.find(o=>o.id===id);if(o)o.visible=false;updateExperimentList();},resetExperiment:()=>{if(!experiment)return;experiment.reset({mass:settings.mass*1e6});uniforms.objectCount.value=0;updateExperimentList();}};
     window.dispatchEvent(new Event('blackhole-ready'));
   }
   function setDynamics(snapshot){
@@ -169,6 +172,7 @@
       // Hold physical kilometres fixed: changing mass must change apparent geometry.
       const next=Math.max(minimumRadius(),Math.min(1000,cameraKm/massKm()));
       motion.distance=settings.distance=next;cameraKm=next*massKm();invalidateLookup();updateReadouts();
+      if(experiment)experiment.reset({mass:settings.mass*1e6});
     });
     controllers.camera=space.add(settings,'camera',['Static','Orbiting','Flyby','Plunge']).name('Observer').onChange(changeCamera);
     controllers.distance=space.add(settings,'distance',1.51,1000,.01).name('Distance · rₛ').listen().onChange(value=>{stopTour();setDistance(value);});
@@ -208,6 +212,21 @@
     compare.add(settings,'comparisonMode',['Natural','Temperature','Gravity','Artistic','Doppler']).name('Right-hand mode');
     compare.add(settings,'comparisonSplit',.1,.9,.01).name('Split position');
     compare.close();
+    const experimentFolder=gui.addFolder('Experiment');
+    experimentFolder.add(settings,'experimentSpeed',0,10,.1).name('Speed ×');
+    experimentFolder.add(settings,'experimentRadius',.5,80,.5).name('Spawn radius · rₛ');
+    experimentFolder.add(settings,'experimentAzimuth',-180,180,1).name('Azimuth · °');
+    experimentFolder.add(settings,'experimentElevation',-90,90,1).name('Elevation · °');
+    const spawnActions={probe:()=>spawnObject('Probe'),rock:()=>spawnObject('Rock'),spacecraft:()=>spawnObject('Spacecraft'),star:()=>spawnObject('Star'),cloud:()=>spawnObject('Cloud'),light:()=>spawnObject('Light')};
+    experimentFolder.add(spawnActions,'probe').name('＋ Probe');
+    experimentFolder.add(spawnActions,'rock').name('＋ Rock');
+    experimentFolder.add(spawnActions,'spacecraft').name('＋ Spacecraft');
+    experimentFolder.add(spawnActions,'star').name('＋ Star');
+    experimentFolder.add(spawnActions,'cloud').name('＋ Cloud');
+    experimentFolder.add(spawnActions,'light').name('＋ Light beam');
+    const experimentReset={reset:()=>resetExperiment()};
+    experimentFolder.add(experimentReset,'reset').name('↺ Reset experiment');
+    experimentFolder.close();
     for(const [name,colors] of Object.entries(palettes)){
       const button=document.createElement('button');button.title=name;button.setAttribute('aria-label',name+' palette');
       button.style.background=`linear-gradient(120deg,${colors.join(',')})`;
@@ -218,6 +237,35 @@
   function setPalette(name){
     if(palettes[name])[settings.cold,settings.middle,settings.hot]=palettes[name];
     updateMode();gui.controllersRecursive().forEach(c=>c.updateDisplay());
+  }
+  function spawnObject(type){
+    if(!experiment)return;
+    const az=settings.experimentAzimuth*Math.PI/180,elev=settings.experimentElevation*Math.PI/180;
+    const dir=type==='Light'?az*180/Math.PI:0;
+    experiment.spawn({type,r:settings.experimentRadius,azimuth:az,elevation:elev,speed:settings.experimentSpeed,direction:dir});
+    updateExperimentList();
+  }
+  function resetExperiment(){
+    if(!experiment)return;
+    experiment.reset({mass:settings.mass*1e6});uniforms.objectCount.value=0;updateExperimentList();
+  }
+  function updateExperimentList(){
+    const host=$('experiment-list');if(!host)return;
+    host.innerHTML='';
+    if(!experiment||!experiment.objects.length){host.innerHTML='<span class="experiment-empty">No objects spawned</span>';return;}
+    for(const o of experiment.objects){
+      const row=document.createElement('div');row.className='experiment-row';
+      row.innerHTML=`<span class="experiment-type">${o.type} #${o.id}</span>
+        <button class="experiment-toggle" data-id="${o.id}" title="${o.visible?'Hide':'Show'}">${o.visible?'◉':'○'}</button>
+        <button class="experiment-remove" data-id="${o.id}" title="Remove">×</button>`;
+      host.appendChild(row);
+    }
+    host.querySelectorAll('.experiment-toggle').forEach(btn=>btn.onclick=()=>{
+      const o=experiment.objects.find(o=>o.id===+btn.dataset.id);if(o)o.visible=!o.visible;updateExperimentList();
+    });
+    host.querySelectorAll('.experiment-remove').forEach(btn=>btn.onclick=()=>{
+      const o=experiment.objects.find(o=>o.id===+btn.dataset.id);if(o)o.visible=false;updateExperimentList();
+    });
   }
   function updateMode(){
     if(!gui)return;
@@ -494,6 +542,7 @@
   function reset(){
     stopTour();gsap.killTweensOf(motion);Object.assign(settings,defaults);orbit=null;flyby=null;plunge=null;properTime=0;qualityScale=1;
     Object.assign(motion,{yaw:.25,elevation:.23,distance:defaults.distance});cameraKm=massKm()*motion.distance;
+    if(experiment){experiment.reset({mass:settings.mass*1e6});uniforms.objectCount.value=0;}
     invalidateLookup();lastBand='';updateCameraControls();setPalette(settings.palette);resize();
     gui.controllersRecursive().forEach(c=>c.updateDisplay());
   }
@@ -533,12 +582,18 @@
     if(document.hidden){requestAnimationFrame(frame);return;}
     const dt=lastTime?Math.min(.1,(time-lastTime)/1000):0;lastTime=time;
     updateCamera(dt);updateUniforms();
+    if(experiment){
+      const engineDt=settings.paused?0:dt*settings.clockRate;
+      const snapshot=experiment.advance(engineDt/100);
+      setDynamics(snapshot);
+    }
     // The model is stationary. Reuse exact intersection buffers until a geometric
     // input changes; palette/exposure/toggle edits need only the cheap display pass.
     const geometryKey=[...uniforms.cameraPosition.value.toArray(),...uniforms.cameraRight.value.toArray(),
       ...uniforms.cameraUp.value.toArray(),...uniforms.cameraForward.value.toArray(),...uniforms.cameraVelocity.value.toArray(),settings.fov,
       settings.disk,settings.diskModel,settings.camera,settings.peakTemperature,uniforms.maxSteps.value,uniforms.tolerance.value,
-      uniforms.useLookup.value,uniforms.lookupRange.value.z,uniforms.coordinateTime.value,uniforms.objectCount.value].join(',');
+      uniforms.useLookup.value,uniforms.lookupRange.value.z,uniforms.coordinateTime.value,uniforms.objectCount.value,
+      experiment?experiment.time:0,experiment?experiment.objects.filter(o=>o.visible).length:0].join(',');
     const traced=geometryKey!==lastGeometryKey;
     try{
       if(traced){quad.material=geometryMaterial;renderer.setRenderTarget(target);renderer.render(scene,ortho);lastGeometryKey=geometryKey;}
