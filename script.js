@@ -102,7 +102,11 @@
       gravityOpacity:{value:.3},dopplerExaggeration:{value:1},paletteA:{value:new THREE.Color()},
       paletteB:{value:new THREE.Color()},paletteC:{value:new THREE.Color()},
       diskModel:{value:0},ntPeakFlux:{value:P.NT_PEAK_FLUX},metadataBuffer:{value:null},
-      comparisonEnabled:{value:false},comparisonMode:{value:0},comparisonSplit:{value:.5},samplesPerPixel:{value:1}};
+      comparisonEnabled:{value:false},comparisonMode:{value:0},comparisonSplit:{value:.5},samplesPerPixel:{value:1},
+      objectCount:{value:0},coordinateTime:{value:0},historyCounts:{value:Array(8).fill(0)},
+      objectBoundsMin:{value:Array.from({length:8},()=>vector())},objectBoundsMax:{value:Array.from({length:8},()=>vector())},
+      objectPositions:{value:floatTexture(new Float32Array(8*2048*4),2048,8)},
+      objectVelocities:{value:floatTexture(new Float32Array(8*2048*4),2048,8)},objectShapes:{value:floatTexture(new Float32Array(8*2048*4),2048,8)}};
     target=new THREE.WebGLMultipleRenderTargets(1,1,3);
     target.depthBuffer=false;target.stencilBuffer=false;
     target.texture.forEach(t=>{t.type=THREE.FloatType;t.minFilter=t.magFilter=THREE.NearestFilter;t.generateMipmaps=false;});
@@ -126,21 +130,41 @@
     if(!reducedMotion)gsap.to('.loading-orbit',{rotation:360,duration:2,repeat:-1,ease:'none'});
     requestAnimationFrame(frame);
     // Small public inspection surface for reproducible numerical/browser checks.
-    window.blackHoleLab={settings,motion,renderer,uniforms,get target(){return target;},
+    window.blackHoleLab={settings,motion,renderer,uniforms,THREE,get target(){return target;},
       setMode:mode=>{settings.color=mode;updateMode();gui.controllersRecursive().forEach(c=>c.updateDisplay());},
       setCamera:mode=>{settings.camera=mode;changeCamera();},
       setDistance:r=>{stopTour();setDistance(r,false);},
-      reset,probe:readProbe,physics:P,gui,resize,updateMode,readPixel,
+      reset,probe:readProbe,physics:P,gui,resize,updateMode,readPixel,setDynamics,
       get cameraVectors(){return cameraVectors;},get fps(){return fps;},get properTime(){return properTime;},
       get traceMilliseconds(){return traceMilliseconds;},get flyby(){return flyby;},get plunge(){return plunge;},
       get frameNumber(){return frameNumber;},get defaults(){return {...defaults};},
       exportPNG:()=>{quad.material=presentationMaterial;renderer.setRenderTarget(null);renderer.render(scene,ortho);return renderer.domElement.toDataURL('image/png');}};
     window.dispatchEvent(new Event('blackhole-ready'));
   }
+  function setDynamics(snapshot){
+    const objects=snapshot.objects.filter(o=>o.visible&&o.type!=='Light').slice(0,8);
+    uniforms.objectCount.value=objects.length;uniforms.coordinateTime.value=snapshot.time;
+    uniforms.historyCounts.value.fill(0);
+    const positions=uniforms.objectPositions.value.image.data,velocities=uniforms.objectVelocities.value.image.data,shapes=uniforms.objectShapes.value.image.data;
+    for(let id=0;id<objects.length;id++){
+      const object=objects[id],history=object.history.slice(-2048);uniforms.historyCounts.value[id]=history.length;
+      const min=uniforms.objectBoundsMin.value[id].set(Infinity,Infinity,Infinity),max=uniforms.objectBoundsMax.value[id].set(-Infinity,-Infinity,-Infinity);
+      history.forEach((h,i)=>{
+        const offset=(id*2048+i)*4,radius=object.config.radius/snapshot.rs;
+        positions.set([h.t,...h.x],offset);velocities.set(h.u,offset);
+        const axes=h.axes.map(a=>a*radius),period=object.config.pulsePeriod||snapshot.units;
+        const temperature=object.type==='Probe'&&((h.tau*snapshot.units)%period)>period*.2?0:h.temperature;
+        shapes.set([...axes,h.ended?0:temperature],offset);
+        const extent=Math.max(...axes)*4;min.min(vector(...h.x).addScalar(-extent));max.max(vector(...h.x).addScalar(extent));
+      });
+    }
+    uniforms.objectPositions.value.needsUpdate=uniforms.objectVelocities.value.needsUpdate=uniforms.objectShapes.value.needsUpdate=true;
+    lastGeometryKey='';
+  }
   function buildControls(){
     gui=new lil.GUI({container:$('gui-host'),title:'Simulation'});
     const space=gui.addFolder('Black hole & observer');
-    controllers.mass=space.add(settings,'mass',1,12,.01).name('Mass · million M☉').onChange(()=>{
+    controllers.mass=space.add(settings,'mass',.00001,6500,.00001).name('Mass · million M☉').onChange(()=>{
       stopTour();gsap.killTweensOf(motion,'distance');
       // Hold physical kilometres fixed: changing mass must change apparent geometry.
       const next=Math.max(minimumRadius(),Math.min(1000,cameraKm/massKm()));
@@ -486,7 +510,7 @@
     host.addEventListener('wheel',e=>{
       e.preventDefault();stopTour();
       // Logarithmic zoom of distance above minimum: progressively finer near the hole.
-      const minimum=minimumRadius(),base=gsap.isTweening(motion)?settings.distance:motion.distance;
+    const minimum=minimumRadius(),base=gsap.isTweening(motion)?settings.distance:motion.distance;
       const normalized=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?height:1);
       setDistance(minimum+(base-minimum+.01)*Math.exp(Math.max(-.5,Math.min(.5,normalized*.0015)))-.01);
     },{passive:false});
@@ -514,7 +538,7 @@
     const geometryKey=[...uniforms.cameraPosition.value.toArray(),...uniforms.cameraRight.value.toArray(),
       ...uniforms.cameraUp.value.toArray(),...uniforms.cameraForward.value.toArray(),...uniforms.cameraVelocity.value.toArray(),settings.fov,
       settings.disk,settings.diskModel,settings.camera,settings.peakTemperature,uniforms.maxSteps.value,uniforms.tolerance.value,
-      uniforms.useLookup.value,uniforms.lookupRange.value.z].join(',');
+      uniforms.useLookup.value,uniforms.lookupRange.value.z,uniforms.coordinateTime.value,uniforms.objectCount.value].join(',');
     const traced=geometryKey!==lastGeometryKey;
     try{
       if(traced){quad.material=geometryMaterial;renderer.setRenderTarget(target);renderer.render(scene,ortho);lastGeometryKey=geometryKey;}
@@ -529,7 +553,7 @@
     if(time-fpsTime>=1000){
       fps=frames*1000/(time-fpsTime);frames=0;fpsTime=time;
       $('fps').textContent=Math.round(fps)+' FPS';updateReadouts();
-      if(fps<26&&time-lastResize>2500)lowFpsCount++;else lowFpsCount=0;
+      if(traced&&fps<26&&time-lastResize>2500)lowFpsCount++;else lowFpsCount=0;
       if(lowFpsCount>=3&&qualityScale>.5){qualityScale*=.85;lowFpsCount=0;resize();}
     }
     requestAnimationFrame(frame);
