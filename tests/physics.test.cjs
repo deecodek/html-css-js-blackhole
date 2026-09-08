@@ -1,0 +1,27 @@
+'use strict';
+const assert=require('node:assert/strict');
+const P=require('../physics.js');
+function near(a,b,tolerance,message){assert.ok(Math.abs(a-b)<tolerance,`${message}: ${a} vs ${b}`);}
+near(P.schwarzschildKm(1),2.95334,.00002,'Solar Schwarzschild radius in km');
+near(P.orbitalBeta(3),.5,1e-14,'ISCO local speed is c/2');
+near(P.derivative([2/3,0])[1],0,1e-15,'Circular photon solution at r=1.5rs');
+near(P.invariant([2/3,0]),1/(P.BC*P.BC),1e-15,'Critical impact parameter');
+assert.equal(P.trace(P.BC*.999).captured,true,'Subcritical ray is captured');
+assert.equal(P.trace(P.BC*1.001).captured,false,'Supercritical ray escapes');
+assert.ok(P.trace(P.BC*1.00001).angle>P.trace(P.BC*1.01).angle,'Near-critical winding grows');
+assert.equal(P.trace(.5,1.2,false).captured,false,'Outward photon inside photon sphere can escape');
+const weak=P.trace(100,1e7,true,.001);
+near(weak.angle-Math.PI+Math.asin(100/1e7),.02,.0004,'Weak deflection approaches 4M/b=2/b');
+const coarse=P.trace(4,1000,true,.08),fine=P.trace(4,1000,true,.04),reference=P.trace(4,1000,true,.002);
+assert.ok(Math.abs(coarse.angle-reference.angle)>8*Math.abs(fine.angle-reference.angle),'RK4 convergence under step halving');
+assert.ok(reference.drift<1e-9,'Conserved quantity remains stable');
+near(P.temperature(3),0,1e-10,'Zero torque inner boundary');
+near(P.temperature(49/12),45000,1e-7,'Correct SS peak');
+assert.ok(P.temperature(20)<P.temperature(8),'Disk cools outward');
+const boost=P.boostSky([1,0,0],[.5,0,0]);
+near(boost.frequency,Math.sqrt(3),1e-14,'Forward observer blueshift');
+const q=[.6,.8,0],v=[.4,0,0],a=P.boostSky(q,v),back=P.boostSky(a.direction,v.map(x=>-x));
+q.forEach((x,i)=>near(back.direction[i],x,1e-14,'Aberration roundtrip'));
+near(a.direction.reduce((s,x)=>s+x*x,0),1,1e-14,'Aberrated ray remains null/unit');
+assert.ok(P.spectrumXYZ(12000)[1]>P.spectrumXYZ(6000)[1],'Planck visible radiance increases with T');
+console.log('PASS: Schwarzschild scales, photon orbit, capture/escape, winding, weak deflection, RK4 convergence, invariant, disk profile, aberration and spectral radiance.');
